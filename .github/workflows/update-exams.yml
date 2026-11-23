@@ -1,0 +1,56 @@
+name: 更新考古題題庫
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'      # 每 6 小時一次（UTC）；全部抓完後，沒有新試卷時幾秒就結束
+  workflow_dispatch:             # 也可以在 Actions 頁面手動按 Run workflow
+
+permissions:
+  contents: write
+
+concurrency:
+  group: exam-bank
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安裝工具
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils
+          pip install -q pdfplumber
+
+      - name: 更新考選部清單（有設定 CSV_URL 才會更新，失敗就沿用舊清單）
+        if: ${{ vars.CSV_URL != '' }}
+        env:
+          CSV_URL: ${{ vars.CSV_URL }}
+        run: |
+          if curl -fsSL --retry 3 -o /tmp/list.csv "$CSV_URL" && head -c 300 /tmp/list.csv | grep -q "考試年度"; then
+            gzip -9 -c /tmp/list.csv > data/ExamQandA_Csv.csv.gz && echo "清單已更新"
+          else
+            echo "清單下載失敗，沿用舊清單"
+          fi
+
+      - name: 抓題與解析（每次最多 300 分鐘，跑不完下次接著跑）
+        run: |
+          python3 tools/exam_pipeline.py --csv data/ExamQandA_Csv.csv.gz --laws laws/index.json \
+            --out docs/exams --minutes 300 --sleep 1
+          touch docs/.nojekyll
+
+      - name: 存回專案（GitHub Pages 會自動更新網站）
+        run: |
+          git config user.name "exam-bot"
+          git config user.email "exam-bot@users.noreply.github.com"
+          git add -A docs data
+          if git diff --cached --quiet; then echo "沒有變更"; exit 0; fi
+          git commit -q -m "題庫更新 $(date -u +%F)"
+          git pull --rebase -q || true
+          git push -q
