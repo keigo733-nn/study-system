@@ -41,7 +41,7 @@ jobs:
 
       - name: 抓題與解析（每次最多 300 分鐘，跑不完下次接著跑）
         run: |
-          python3 tools/exam_pipeline.py --csv data/ExamQandA_Csv.csv.gz --laws laws/index.json \
+          python3 -u tools/exam_pipeline.py --csv data/ExamQandA_Csv.csv.gz --laws laws/index.json \
             --out docs/exams --minutes 300 --sleep 1
           touch docs/.nojekyll
 
