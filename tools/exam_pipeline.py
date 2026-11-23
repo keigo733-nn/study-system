@@ -55,12 +55,16 @@ def load_papers(csv_path, since):
     return list(papers.values())
 
 
+class DownloadError(Exception):
+    """下載問題（網路、被擋、回傳不是 PDF）：不記成永久失敗，下次再試。"""
+
+
 def fetch(url, dest, mock_dir=None, tries=3):
     if mock_dir:                                     # 測試用：依網址參數對應本機檔案
         key = f"{q_param(url, 't')}_{q_param(url, 'code')}_{q_param(url, 's')}.pdf"
         src = os.path.join(mock_dir, key)
         if not os.path.exists(src):
-            raise FileNotFoundError('mock 沒有 ' + key)
+            raise DownloadError('mock 沒有 ' + key)
         with open(src, 'rb') as a, open(dest, 'wb') as b:
             b.write(a.read())
         return
@@ -68,15 +72,17 @@ def fetch(url, dest, mock_dir=None, tries=3):
     for i in range(tries):
         try:
             req = urllib.request.Request(url, headers={'User-Agent': UA})
-            with urllib.request.urlopen(req, timeout=60) as r, open(dest, 'wb') as f:
-                data = r.read()
-                if not data.startswith(b'%PDF'):
-                    raise ValueError('下載內容不是 PDF')
+            with urllib.request.urlopen(req, timeout=60) as r:
+                data, ctype = r.read(), r.headers.get('Content-Type', '')
+            if not data.startswith(b'%PDF'):
+                head = re.sub(rb'\s+', b' ', data[:160]).decode('utf-8', 'replace')
+                raise DownloadError(f'回傳的不是 PDF（{ctype}，{len(data)} bytes）：{head}')
+            with open(dest, 'wb') as f:
                 f.write(data)
             return
         except Exception as e:
             last = e; time.sleep(3 * (i + 1))
-    raise last
+    raise last if isinstance(last, DownloadError) else DownloadError(f'下載失敗：{last}')
 
 
 def compact(p, paper):
@@ -140,7 +146,7 @@ def main():
     queue = sorted([p for p in papers if todo(p)], key=lambda p: (-p['year'], p['code']))
     print(f'清單共 {len(papers)} 份試卷，待處理 {len(queue)} 份')
 
-    t0, done, ok_n, fail = time.time(), 0, 0, []
+    t0, done, ok_n, fail, net_fail, streak = time.time(), 0, 0, [], 0, 0
     with tempfile.TemporaryDirectory() as tmp:
         for p in queue:
             if a.max and done >= a.max:
@@ -162,13 +168,22 @@ def main():
                 with open(os.path.join(a.out, 'p', p['id'] + '.json'), 'w', encoding='utf-8') as f:
                     json.dump(compact(p, paper), f, ensure_ascii=False, separators=(',', ':'))
                 state[p['id']] = {'status': 'ok', 'a_url': p['a_url'], 'nm': len(paper['mcq']), 'ne': len(paper['essays'])}
-                ok_n += 1
-            except Exception as e:
+                ok_n += 1; streak = 0
+            except DownloadError as e:                 # 下載問題：不記錄，下次重試
+                net_fail += 1; streak += 1
+                print(f'  ⚠ 下載問題 {p["id"]}｜{p["subject"][:20]}：{str(e)[:220]}')
+                if streak >= 30:
+                    print('連續 30 份下載失敗，考選部可能暫時擋下或連不上，這次先停，下次再接著跑'); break
+                if streak >= 5:
+                    print(f'  連續 {streak} 份下載失敗，暫停 {min(300, streak * 20)} 秒'); time.sleep(0 if a.mock_dir else min(300, streak * 20))
+            except Exception as e:                     # 解析問題：記成失敗，不上架
+                streak = 0
                 state[p['id']] = {'status': 'fail', 'a_url': p['a_url'], 'why': str(e)[:300]}
                 fail.append((p, str(e)[:200]))
+                print(f'  ✗ 解析失敗 {p["id"]}｜{p["year"]} {p["level"]}｜{p["subject"][:20]}｜{p["type"]}：{str(e)[:200]}')
             if done % 25 == 0:                       # 定期存檔，中途被中斷也不會白做
                 json.dump(state, open(state_path, 'w', encoding='utf-8'), ensure_ascii=False)
-                print(f'  進度 {done}/{len(queue)}，成功 {ok_n}')
+                print(f'  進度 {done}/{len(queue)}，成功 {ok_n}，解析失敗 {len(fail)}，下載問題 {net_fail}')
 
     json.dump(state, open(state_path, 'w', encoding='utf-8'), ensure_ascii=False)
     if done == 0 and os.path.exists(os.path.join(a.out, 'index.json')):
@@ -177,7 +192,7 @@ def main():
     remain = len([p for p in papers if todo(p)])
     all_fail = [(pid, s['why']) for pid, s in state.items() if s['status'] == 'fail']
     rep = [f'# 題庫更新報告（{time.strftime("%Y-%m-%d %H:%M")}）', '',
-           f'- 本次處理 {done} 份：成功 {ok_n}、失敗 {len(fail)}',
+           f'- 本次處理 {done} 份：成功 {ok_n}、解析失敗 {len(fail)}、下載問題 {net_fail}（下載問題下次會自動重試）',
            f'- 題庫目前共 {total} 份試卷；清單中還有 {remain} 份待處理',
            f'- 累計失敗 {len(all_fail)} 份（不會上架，修好解析程式後加 --retry-failed 重跑）', '']
     if fail:
