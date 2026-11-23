@@ -17,7 +17,7 @@ import argparse, csv, gzip, hashlib, io, json, os, re, sys, tempfile, time, urll
 from collections import OrderedDict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from parse_exam import build_paper, build_law_matcher
+from parse_exam import build_paper, build_law_matcher, PARSER_VERSION
 
 UA = 'Mozilla/5.0 (study-system exam bank; contact via repository issues)'
 
@@ -65,8 +65,11 @@ def fetch(url, dest, mock_dir=None, tries=3):
         src = os.path.join(mock_dir, key)
         if not os.path.exists(src):
             raise DownloadError('mock 沒有 ' + key)
-        with open(src, 'rb') as a, open(dest, 'wb') as b:
-            b.write(a.read())
+        data = open(src, 'rb').read()
+        if not data.startswith(b'%PDF'):
+            raise DownloadError(f'回傳的不是 PDF（mock，{len(data)} bytes）')
+        with open(dest, 'wb') as b:
+            b.write(data)
         return
     last = None
     for i in range(tries):
@@ -142,6 +145,12 @@ def main():
             return True
         if st.get('a_url') != p['a_url']:          # 答案網址變了（例如公布更正答案）
             return True
+        if st['status'] == 'missing':              # 考選部連續多次沒有給 PDF：不再嘗試
+            return False
+        if st['status'] == 'net':                  # 之前下載有問題：重試
+            return True
+        if st['status'] == 'fail' and st.get('pv', 1) < PARSER_VERSION:   # 解析程式改版 → 自動重試
+            return True
         return st['status'] == 'fail' and a.retry_failed
     queue = sorted([p for p in papers if todo(p)], key=lambda p: (-p['year'], p['code']))
     print(f'清單共 {len(papers)} 份試卷，待處理 {len(queue)} 份')
@@ -169,8 +178,13 @@ def main():
                     json.dump(compact(p, paper), f, ensure_ascii=False, separators=(',', ':'))
                 state[p['id']] = {'status': 'ok', 'a_url': p['a_url'], 'nm': len(paper['mcq']), 'ne': len(paper['essays'])}
                 ok_n += 1; streak = 0
-            except DownloadError as e:                 # 下載問題：不記錄，下次重試
+            except DownloadError as e:                 # 下載問題：下次重試；連續 3 次都回傳網頁（不是 PDF）就不再嘗試
                 net_fail += 1; streak += 1
+                prev = state.get(p['id'], {})
+                nf = (prev.get('nf', 0) + 1) if '不是 PDF' in str(e) else 0
+                state[p['id']] = {'status': 'missing' if nf >= 3 else 'net', 'a_url': p['a_url'], 'nf': nf, 'why': str(e)[:200]}
+                if '不是 PDF' in str(e):
+                    streak = 0                         # 單份沒有檔案，不代表被擋
                 print(f'  ⚠ 下載問題 {p["id"]}｜{p["subject"][:20]}：{str(e)[:220]}')
                 if streak >= 30:
                     print('連續 30 份下載失敗，考選部可能暫時擋下或連不上，這次先停，下次再接著跑'); break
@@ -178,7 +192,7 @@ def main():
                     print(f'  連續 {streak} 份下載失敗，暫停 {min(300, streak * 20)} 秒'); time.sleep(0 if a.mock_dir else min(300, streak * 20))
             except Exception as e:                     # 解析問題：記成失敗，不上架
                 streak = 0
-                state[p['id']] = {'status': 'fail', 'a_url': p['a_url'], 'why': str(e)[:300]}
+                state[p['id']] = {'status': 'fail', 'a_url': p['a_url'], 'why': str(e)[:300], 'pv': PARSER_VERSION}
                 fail.append((p, str(e)[:200]))
                 print(f'  ✗ 解析失敗 {p["id"]}｜{p["year"]} {p["level"]}｜{p["subject"][:20]}｜{p["type"]}：{str(e)[:200]}')
             if done % 25 == 0:                       # 定期存檔，中途被中斷也不會白做
@@ -191,10 +205,12 @@ def main():
     total = write_index(a.out, papers, state)
     remain = len([p for p in papers if todo(p)])
     all_fail = [(pid, s['why']) for pid, s in state.items() if s['status'] == 'fail']
+    missing = sum(1 for s in state.values() if s['status'] == 'missing')
     rep = [f'# 題庫更新報告（{time.strftime("%Y-%m-%d %H:%M")}）', '',
            f'- 本次處理 {done} 份：成功 {ok_n}、解析失敗 {len(fail)}、下載問題 {net_fail}（下載問題下次會自動重試）',
            f'- 題庫目前共 {total} 份試卷；清單中還有 {remain} 份待處理',
-           f'- 累計失敗 {len(all_fail)} 份（不會上架，修好解析程式後加 --retry-failed 重跑）', '']
+           f'- 累計解析失敗 {len(all_fail)} 份（不會上架；解析程式改版後會自動重試）',
+           f'- 考選部沒有提供 PDF 的試卷 {missing} 份（連續 3 次都下載不到，已不再嘗試）', '']
     if fail:
         rep += ['## 本次失敗', ''] + [f'- {p["year"]} {p["exam"][:30]}｜{p["subject"][:30]}：{why}' for p, why in fail[:200]]
     open(os.path.join(a.out, 'report.md'), 'w', encoding='utf-8').write('\n'.join(rep) + '\n')
