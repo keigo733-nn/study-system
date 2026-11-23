@@ -14,7 +14,7 @@ refs = 題目中出現的法條，例如 {"q":"行政程序法102", "law":"行�
 import json, re, subprocess, sys, unicodedata
 
 # 解析程式版本：改版後，先前解析失敗的試卷會自動重試
-PARSER_VERSION = 4
+PARSER_VERSION = 6
 
 SUB_MARKS = {'\ue129': '①', '\ue12a': '②', '\ue12b': '③', '\ue12c': '④', '\ue12d': '⑤', '\ue12e': '⑥'}   # 子題、注意事項的圈號
 
@@ -77,8 +77,8 @@ def parse_questions(path):
     text = strip_page_headers(raw.replace('\f', '\n'))
 
     essays, mcq = [], []
-    i_mcq = re.search(r'[乙丙丁]、\s*測驗(?:題)?(?:部分)?[：:（(]', text)
-    i_essay = re.search(r'[甲乙]、\s*(?:申論|作文|公文|翻譯)(?:題)?(?:部分)?[：:（(]', text)
+    i_mcq = re.search(r'(?:[乙丙丁]|[二三四])、\s*測驗(?:題)?(?:部分)?\s*[：:（(\n]', text)
+    i_essay = re.search(r'(?:[甲乙]|[一二])、\s*(?:申論|作文|公文|翻譯)(?:題)?(?:部分)?\s*[：:（(\n]', text)
     essay_txt = text[i_essay.end(): i_mcq.start() if i_mcq else len(text)] if i_essay else ''
     mcq_txt = text[i_mcq.end():] if i_mcq else ''
     if not i_essay and not i_mcq:          # 純測驗或純申論的試卷
@@ -91,6 +91,8 @@ def parse_questions(path):
     if essay_txt:
         essay_txt = essay_txt.translate(str.maketrans(SUB_MARKS))
         parts = re.split(r'\n(?=[一二三四五六七八九十]+、)', '\n' + essay_txt)
+        pre = strip_notices(parts[0]) if parts else ''
+        by_heading = False
         for p in parts:
             m = re.match(r'([一二三四五六七八九十]+)、(.*)', p.strip(), re.S)
             if not m:
@@ -98,8 +100,27 @@ def parse_questions(path):
             body = re.sub(r'\n(?![「①②③④⑤⑥]|[（(][一二三四五六七八九十]+[）)])', '', m.group(2)).strip()
             sm = re.search(r'（(\d+)\s*分）\s*$', body)
             essays.append({'no': cn2num(m.group(1)), 'text': body, 'score': int(sm.group(1)) if sm else None})
+        by_heading = bool(essays)
+        if not essays:
+            parts = re.split(r'\n(?=\d{1,2}[.．])', '\n' + strip_notices(essay_txt))
+            for p in parts:
+                m = re.match(r'(\d{1,2})[.．](.*)', p.strip(), re.S)
+                if not m:
+                    continue
+                body = re.sub(r'\n(?![「①②③④⑤⑥]|[（(][一二三四五六七八九十]+[）)])', '', m.group(2)).strip()
+                sm = re.search(r'（(\d+)\s*分）\s*$', body)
+                essays.append({'no': int(m.group(1)), 'text': body, 'score': int(sm.group(1)) if sm else None})
+            if not all(e['score'] for e in essays):
+                essays = []
         if not essays:
             essays = split_essays_by_score(essay_txt)
+        if not essays and i_essay:
+            body = strip_notices(essay_txt)
+            if len(body) > 20:
+                hm = re.search(r'[（(](\d+)\s*分[）)]', text[i_essay.start():i_essay.start() + 40])
+                essays = [{'no': 1, 'text': re.sub(r'\n(?![「①②③④⑤⑥]|[（(][一二三四五六七八九十]+[）)])', '', body), 'score': int(hm.group(1)) if hm else None}]
+        if by_heading and len(pre) > 60:          # 多題共用的引文（作文題常見）
+            essays[0]['passage'] = re.sub(r'\n', '', pre)
 
     # 測驗題：用每個字的座標重組成行（不同試卷的文字順序不一定可靠）
     if mcq_txt:
@@ -109,20 +130,28 @@ def parse_questions(path):
         elif cm and i_mcq:
             meta['code'] = cm.group(1)
         mcq = parse_mcq_by_position(path, has_essay=bool(i_essay))
+    for e in essays:                               # 配分：子題分數加總
+        sc = [int(x) for x in re.findall(r'[（(](\d+)\s*分[）)]', e['text'])]
+        if len(sc) > 1:
+            e['score'] = sum(sc)
     meta['essays'] = essays
     meta['mcq'] = mcq
     return meta
 
 
+def strip_notices(txt):
+    """去掉開頭的考試資訊、注意事項。"""
+    cut = 0
+    for kw in ('應使用本國文字作答', '不予計分', '禁止使用電子計算器', '座號', '橫式作答', '姓名或座號', '作答內容'):
+        for m in re.finditer(re.escape(kw), txt[:2500]):
+            cut = max(cut, txt.find('\n', m.end()) + 1)
+    return txt[cut:].strip()
+
+
 def split_essays_by_score(txt):
     """題號是圖片、文字裡沒有「一、」的試卷：以每題結尾的「（25 分）」切開；①② 子題併回上一題。"""
     # 去掉開頭的考試資訊與注意事項
-    cut = 0
-    for kw in ('應使用本國文字作答', '不予計分', '禁止使用電子計算器', '座號'):
-        i = txt.find(kw, 0, 2500)
-        if i >= 0:
-            cut = max(cut, txt.find('\n', i) + 1)
-    body = txt[cut:]
+    body = strip_notices(txt)
     parts = re.split(r'(?<=分）)\s*\n', body)
     essays = []
     for part in parts:
@@ -176,7 +205,7 @@ def parse_mcq_by_position(path, has_essay):
     lines = positioned_lines(path)
     if has_essay:                                   # 跳過申論部分
         for i, (_, t) in enumerate(lines):
-            if re.search(r'[乙丙丁]、\s*測驗', t):
+            if re.search(r'(?:[乙丙丁]|[二三四])、\s*測驗', t):
                 lines = lines[i + 1:]; break
     # 選項格式一：特殊符號（多數公務人員考試）；格式二：「A.」「B.」（專技高考等）
     pua = any(t[0] in OPT_MARKS for _, t in lines)
@@ -186,6 +215,9 @@ def parse_mcq_by_position(path, has_essay):
     if not opt_xs:
         return []
     opt_x = min(opt_xs)
+    numbered = any(x < opt_x - 5 and re.match(r'^\d{1,3}[.．]?\s*\S', t.strip()) for x, t in lines)
+    if not numbered:
+        return parse_unnumbered(lines, opt_x, is_opt, pua, OPT_RE)
     mcq, cur, opt, expect = [], None, None, 1
     group = None                                   # 題組：{'from','to','text'}
     def next_starts_opt(i):
@@ -201,8 +233,8 @@ def parse_mcq_by_position(path, has_essay):
             group = {'from': int(gm.group(1)), 'to': int(gm.group(2)), 'text': ''}
             cur = None
             continue
-        ns = s.replace(' ', '')
-        if x > 400 or re.match(r'^(代號：|頁次：|說明：|本試題為|共\d+題|※)', ns) or re.fullmatch(r'[\d、\-]{5,}', s):
+        ns = re.sub(r'^[①②③④⑤⑥]', '', s.replace(' ', ''))
+        if x > 400 or re.match(r'^(代號：|頁次：|說明：|本試題為|共\d+題|※|須用2B鉛筆|不必抄題)', ns) or re.fullmatch(r'[\d、\-]{5,}', s):
             continue                                # 頁首、說明文字
         if x < opt_x - 5:
             qm = re.match(r'^(\d{1,3})[.．]?\s*(.*)$', s)
@@ -257,6 +289,80 @@ def parse_mcq_by_position(path, has_essay):
     for q in mcq:
         if re.search(r'附圖|下圖|如圖|右圖|左圖|上圖|圖中|附表|下表|如表', q['q'] + ''.join(q['opts'])):
             q['fig'] = True
+    return mcq
+
+
+GROUP_RE = re.compile(r'^請(?:依|閱讀)下(?:文|列短文|列文章)?.*?回答第\s*(\d+)\s*題(?:至|到|～|~|-)第?\s*(\d+)\s*題')
+
+
+def parse_unnumbered(lines, opt_x, is_opt, pua, OPT_RE):
+    """題號是圖片的試卷：題幹＝上一題選項之後、下一組選項之前的文字；支援題組（克漏字、閱讀測驗）。"""
+    mcq, cur, opt, buf, group = [], None, None, [], None
+
+    def add_opts(s):
+        nonlocal opt
+        if pua:
+            for piece in re.split('(?=[' + ''.join(OPT_MARKS) + '])', s):
+                if piece and piece[0] in OPT_MARKS:
+                    cur['opts'].append(piece[1:].strip()); opt = len(cur['opts']) - 1
+        else:
+            for piece in re.split(r'\s+(?=[A-E][.．])', s):
+                m = OPT_RE.match(piece)
+                if m:
+                    cur['opts'].append(piece[m.end():].strip()); opt = len(cur['opts']) - 1
+                elif opt is not None:
+                    cur['opts'][opt] += piece
+
+    def join(ls):
+        out = ''
+        for _, t in ls:
+            if out and (t.startswith('「') or out.endswith('」')):
+                out += '\n' + t
+            else:
+                out += ('' if not out or out.endswith(('-', '—')) else ' ' if t[:1].isascii() and out[-1:].isascii() else '') + t
+        return out
+
+    for x, t in lines:
+        s = t.strip().translate(str.maketrans(SUB_MARKS))
+        ns = re.sub(r'^[①②③④⑤⑥]', '', s.replace(' ', ''))
+        if x > 400 or re.match(r'^(代號：|頁次：|說明：|本試題為|共\d+題|※|須用2B鉛筆|不必抄題)', ns) or re.fullmatch(r'[\d、\-]{5,}', s):
+            continue
+        gm = GROUP_RE.match(ns)
+        if gm:
+            group = {'from': int(gm.group(1)), 'to': int(gm.group(2)), 'text': None}
+            buf, cur, opt = [], None, None
+            continue
+        if is_opt(s):
+            starting = cur is None or len(cur['opts']) >= 4 and not (cur['opts'] and s.lstrip()[:1] in ('\ue190', 'E'))
+            if starting:
+                no = len(mcq) + 1
+                if group and no > group['to']:
+                    group = None
+                stem_ls, passage = buf, None
+                if group and group['from'] <= no <= group['to']:
+                    if group['text'] is None:                       # 這個題組的第一題：buf 裡是短文（＋題幹）
+                        whole = join(buf)
+                        if re.search(r'(?<!\d)' + str(group['from']) + r'(?!\d)', whole) or not buf:
+                            group['text'], stem_ls = whole, []          # 克漏字：短文裡有空格編號，沒有題幹
+                        else:                                         # 閱讀測驗：最後一段是題幹
+                            k = max([i for i, (bx, _) in enumerate(buf) if bx >= opt_x - 2] or [0])
+                            group['text'], stem_ls = join(buf[:k]), buf[k:]
+                    passage = group['text']
+                cur = {'no': no, 'q': join(stem_ls) if stem_ls else '', 'opts': []}
+                if passage:
+                    cur['passage'] = passage
+                    if not cur['q']:
+                        cur['q'] = f'（題組第 {no} 題：依上方短文作答）'
+                mcq.append(cur); buf, opt = [], None
+            add_opts(s)
+            continue
+        if cur is not None and opt is not None and len(cur['opts']) < 4 and x > opt_x + 2 and not buf:
+            cur['opts'][opt] += s                                   # 選項換行
+            continue
+        if cur is not None and opt is not None and len(cur['opts']) >= 4 and x > opt_x + 2 and not buf:
+            cur['opts'][opt] += s                                   # 最後一個選項換行
+            continue
+        buf.append((x, s))
     return mcq
 
 
