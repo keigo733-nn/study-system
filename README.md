@@ -62,6 +62,23 @@
 
 ---
 
+## 法規自動更新
+另一個排程 `.github/workflows/update-laws.yml` 每週一凌晨從全國法規資料庫下載最新的法律資料，放到 `docs/laws/`。
+讀書系統有連網路時會自己去比對：
+- 有修正的法規自動換成新條文（沒網路時用檔案內建的版本）
+- 筆記裡引用的條文如果文字被修改，引用處會出現 ⚠，提醒你回頭檢查筆記
+- 法條頁會列出「最近修正的法規」
+
+設定方式跟考古題排程一樣：**Add file → Create new file**，檔名輸入 `.github/workflows/update-laws.yml`，內容貼上 `設定用/update-laws.yml`，按 Commit changes。然後到 Actions 手動執行一次 **更新法規**。
+
+### 法規更新失敗時
+如果 Actions 顯示「下載不到法規資料」，代表法務部網站擋住了 GitHub 的伺服器。備案：
+1. 自己用瀏覽器打開 https://law.moj.gov.tw/api/ch/law/json ，會下載一個 zip
+2. 把檔名改成 `ChLaw.zip`，上傳到專案的 `data/` 資料夾
+3. 再執行一次 **更新法規**（之後每次要更新，就重複這幾步）
+
+---
+
 ## 看執行結果
 - **Actions** 分頁：每次執行的紀錄，綠色勾勾表示成功。
 - `docs/exams/report.md`：本次成功幾份、失敗幾份、失敗原因。
@@ -77,9 +94,10 @@
 |---|---|
 | `tools/exam_pipeline.py` | 抓題主程式（可中斷續跑） |
 | `tools/parse_exam.py` | 解析單份試題／答案 PDF |
-| `tools/build_laws.py` | 把全國法規資料庫的 FalV.xml 轉成法規資料 |
+| `tools/build_laws.py` | 把全國法規資料庫的資料（API 下載的 zip 或 FalV.xml）轉成法規資料 |
 | `tools/build_single.py` | 打包成單一 HTML 檔 |
 | `data/ExamQandA_Csv.csv.gz` | 考選部官方清單（壓縮檔） |
-| `laws/index.json` | 法規目錄（辨識題目中的法條用） |
+| `laws/index.json` | 法規目錄（辨識題目中的法條用，法規排程會自動更新） |
+| `docs/laws/` | 自動產生的法規資料（不要手動修改） |
 | `docs/index.html` | 線上版讀書系統 |
 | `docs/exams/` | 自動產生的題庫（不要手動修改） |
