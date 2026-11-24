@@ -14,7 +14,7 @@ refs = 題目中出現的法條，例如 {"q":"行政程序法102", "law":"行�
 import json, re, subprocess, sys, unicodedata
 
 # 解析程式版本：改版後，先前解析失敗的試卷會自動重試
-PARSER_VERSION = 6
+PARSER_VERSION = 7
 
 SUB_MARKS = {'\ue129': '①', '\ue12a': '②', '\ue12b': '③', '\ue12c': '④', '\ue12d': '⑤', '\ue12e': '⑥'}   # 子題、注意事項的圈號
 
@@ -82,7 +82,8 @@ def parse_questions(path):
     essay_txt = text[i_essay.end(): i_mcq.start() if i_mcq else len(text)] if i_essay else ''
     mcq_txt = text[i_mcq.end():] if i_mcq else ''
     if not i_essay and not i_mcq:          # 純測驗或純申論的試卷
-        if any(c in text for c in OPT_MARKS) or len(re.findall(r'(?m)^\s*[A-D][.．]', text)) >= 8:
+        if any(c in text for c in OPT_MARKS) or len(re.findall(r'(?m)^\s*[A-D][.．]', text)) >= 8 \
+                or (re.search(r'選擇題', head) and not re.search(r'(?m)^\s*一、', text)):
             mcq_txt = text
         else:
             essay_txt = text
@@ -134,6 +135,8 @@ def parse_questions(path):
         sc = [int(x) for x in re.findall(r'[（(](\d+)\s*分[）)]', e['text'])]
         if len(sc) > 1:
             e['score'] = sum(sc)
+        if re.search(r'(?<![（(\d])\d+\s*分[）)]', e['text']):   # 子題文字是圖片，只剩「15 分）」
+            e['broken'] = True
     meta['essays'] = essays
     meta['mcq'] = mcq
     return meta
@@ -170,13 +173,20 @@ def split_essays_by_score(txt):
     return essays
 
 
-def positioned_lines(path):
-    """回傳 [(x0, 文字)]：同一基線（±4pt）的字合成一行，依 x 排序；字距過大處補空格。"""
+def positioned_lines(path, img_marks=False):
+    """回傳 [(x0, 文字)]：同一基線（±4pt）的字合成一行，依 x 排序；字距過大處補空格。
+    img_marks：選項符號是小圖片的試卷（例如 115 高考三級），把小圖片當成選項符號補進去。"""
     import pdfplumber
     out = []
     with pdfplumber.open(path) as pdf:
         for pg in pdf.pages:
-            chars = sorted((c for c in pg.chars if c['text'].strip()), key=lambda c: (c['top'], c['x0']))
+            chars = [c for c in pg.chars if c['text'].strip()]
+            if img_marks:
+                for im in pg.images:
+                    if 15 <= im['width'] <= 36 and 8 <= im['height'] <= 16:
+                        chars.append({'text': next(iter(OPT_MARKS)), 'x0': im['x0'], 'x1': im['x1'],
+                                      'top': im['top'] + 1, 'size': im['height']})
+            chars = sorted(chars, key=lambda c: (c['top'], c['x0']))
             rows = []
             for c in chars:
                 if rows and c['top'] - rows[-1][0] <= 4:
@@ -201,8 +211,8 @@ def positioned_lines(path):
     return out
 
 
-def parse_mcq_by_position(path, has_essay):
-    lines = positioned_lines(path)
+def parse_mcq_by_position(path, has_essay, img_marks=False):
+    lines = positioned_lines(path, img_marks)
     if has_essay:                                   # 跳過申論部分
         for i, (_, t) in enumerate(lines):
             if re.search(r'(?:[乙丙丁]|[二三四])、\s*測驗', t):
@@ -210,6 +220,8 @@ def parse_mcq_by_position(path, has_essay):
     # 選項格式一：特殊符號（多數公務人員考試）；格式二：「A.」「B.」（專技高考等）
     pua = any(t[0] in OPT_MARKS for _, t in lines)
     OPT_RE = re.compile(r'^([A-E])[.．]\s*')
+    if not pua and not any(OPT_RE.match(t) for _, t in lines):
+        return parse_mcq_by_position(path, has_essay, img_marks=True) if not img_marks else []
     is_opt = (lambda t: t[0] in OPT_MARKS) if pua else (lambda t: bool(OPT_RE.match(t)))
     opt_xs = [x for x, t in lines if is_opt(t)]
     if not opt_xs:

@@ -5,7 +5,9 @@
   out/index.json        法規目錄：pcode、名稱、簡稱、最新異動日期、廢止註記、條數
   out/law/<pcode>.json  每部法規一個檔：編章節、條文（條號、各項內容）
 
-用法：python3 build_laws.py FalV.xml out
+用法：python3 build_laws.py <FalV.xml | 法務部 API 下載的 zip | ChLaw.json> out [--bundle] [--min=1000]
+  支援兩種格式：政府資料開放平台的舊版 XML（中文標籤），以及全國法規資料庫 API
+  （https://law.moj.gov.tw/api/ch/law/json 或 /xml，回傳 zip，內含英文欄位的 JSON/XML）。
 資料來源：全國法規資料庫（https://law.moj.gov.tw/），政府資料開放授權條款-第1版
 """
 import json, os, re, sys
@@ -101,11 +103,77 @@ def parse_law(law):
     return meta, full
 
 
+# 新版 API 的英文欄位 → 舊版中文標籤
+EN2ZH = {'LawLevel': '法規性質', 'LawName': '法規名稱', 'LawURL': '法規網址', 'LawCategory': '法規類別',
+         'LawModifiedDate': '最新異動日期', 'LawEffectiveDate': '生效日期', 'LawEffectiveNote': '生效內容',
+         'LawAbandonNote': '廢止註記', 'LawHistories': '沿革內容', 'LawForeword': '前言'}
+CH_RANK = {'編': 0, '章': 1, '節': 2, '款': 3, '目': 4}
+
+
+def law_from_dict(d):
+    """新版 JSON 的一部法規 → 跟舊版 XML 一樣的 <法規> 元素"""
+    law = ET.Element('法規')
+    for en, zh in EN2ZH.items():
+        ET.SubElement(law, zh).text = str(d.get(en) or '')
+    content = ET.SubElement(law, '法規內容')
+    arts = d.get('LawArticles') or []
+    # 編章節的層級：有前置空白就照空白，沒有就照「編、章、節、款、目」
+    chs = [a for a in arts if (a.get('ArticleType') or '').upper() == 'C']
+    use_kw = chs and not any((a.get('ArticleContent') or '').startswith(' ') for a in chs)
+    for a in arts:
+        typ = (a.get('ArticleType') or '').upper()
+        if typ == 'C':
+            t = a.get('ArticleContent') or ''
+            if use_kw:
+                m = re.match(r'\s*第\s*\S+?\s*([編章節款目])', t)
+                lv = CH_RANK.get(m.group(1), 1) if m else 1     # 跟舊版 XML 一樣用絕對層級（章＝1）
+                t = ' ' * (3 * lv) + t.strip()
+            ET.SubElement(content, '編章節').text = t
+        else:
+            el = ET.SubElement(content, '條文')
+            ET.SubElement(el, '條號').text = a.get('ArticleNo') or ''
+            ET.SubElement(el, '條文內容').text = a.get('ArticleContent') or ''
+    return law
+
+
+def load_root(src):
+    """回傳 (UpdateDate, [<法規> 元素])"""
+    import io, zipfile
+    data, name = open(src, 'rb').read(), src.lower()
+    if data[:2] == b'PK':                                   # zip：找裡面的 json 或 xml
+        z = zipfile.ZipFile(io.BytesIO(data))
+        names = [n for n in z.namelist() if n.lower().endswith(('.json', '.xml')) and 'manifest' not in n.lower() and 'schema' not in n.lower()]
+        names.sort(key=lambda n: (not n.lower().endswith('.json'), -z.getinfo(n).file_size))
+        if not names:
+            raise SystemExit('zip 裡找不到法規資料檔：' + ', '.join(z.namelist()))
+        data, name = z.read(names[0]), names[0].lower()
+        print('使用 zip 內的', names[0], file=sys.stderr)
+    data = data.lstrip(b'\xef\xbb\xbf').lstrip()
+    if data[:1] in (b'{', b'['):
+        j = json.loads(data.decode('utf-8-sig'))
+        laws = j.get('Laws', j) if isinstance(j, dict) else j
+        return (j.get('UpdateDate', '') if isinstance(j, dict) else ''), [law_from_dict(d) for d in laws]
+    root = ET.fromstring(data)
+    if root.findall('法規'):
+        return root.get('UpdateDate', ''), root.findall('法規')
+    laws = [l for l in root.iter() if l.find('LawName') is not None]   # 新版 XML（英文標籤）
+    out = []
+    for l in laws:
+        d = {c.tag: (c.text or '') for c in l if c.tag != 'LawArticles'}
+        arts = l.find('LawArticles')
+        d['LawArticles'] = [{c.tag: (c.text or '') for c in a} for a in (arts if arts is not None else [])]
+        out.append(law_from_dict(d))
+    return root.get('UpdateDate', '') or (root.findtext('UpdateDate') or ''), out
+
+
 def main(src, out):
-    root = ET.parse(src).getroot()
+    updated, laws = load_root(src)
+    minimum = int(next((a.split('=')[1] for a in sys.argv if a.startswith('--min=')), '0'))
+    if len(laws) < minimum:
+        raise SystemExit(f'只讀到 {len(laws)} 部法規（少於 {minimum}），資料可能不完整，這次不更新。')
     os.makedirs(os.path.join(out, 'law'), exist_ok=True)
     index, names = [], {}
-    for law in root.findall('法規'):
+    for law in laws:
         meta, full = parse_law(law)
         if not meta['p']:
             print('略過（無 pcode）：', meta['n'], file=sys.stderr)
@@ -123,7 +191,7 @@ def main(src, out):
         else:
             print('簡稱對不到法規，已略過：', short, '→', fullname, file=sys.stderr)
     data = {
-        'updated': root.get('UpdateDate', ''),
+        'updated': updated,
         'source': '全國法規資料庫（https://law.moj.gov.tw/）',
         'laws': index,
         'alias': alias_map,
