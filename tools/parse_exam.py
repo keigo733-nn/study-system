@@ -14,7 +14,8 @@ refs = 題目中出現的法條，例如 {"q":"行政程序法102", "law":"行�
 import json, re, subprocess, sys, unicodedata
 
 # 解析程式版本：改版後，先前解析失敗的試卷會自動重試
-PARSER_VERSION = 7
+PARSER_VERSION = 8          # 8：加上試題／答案檔交叉比對
+REFS_VERSION = 2            # 法條辨識改版時加 1：已上架的試卷會用存好的文字重新辨識（不用重新下載）
 
 SUB_MARKS = {'\ue129': '①', '\ue12a': '②', '\ue12b': '③', '\ue12c': '④', '\ue12d': '⑤', '\ue12e': '⑥'}   # 子題、注意事項的圈號
 
@@ -74,6 +75,9 @@ def parse_questions(path):
     m = re.search(r'代號：(\d{3,5})(?!\d)', head)
     if m:
         meta['code'] = m.group(1)
+    # 試題上出現的所有代號（頁首的類科代號、測驗部分的試題代號），用來跟答案檔交叉比對
+    meta['codes'] = sorted({c for m in re.finditer(r'代\s*號\s*[:：]\s*((?:\d[\d\s\-、,，]*\n?)+)', unicodedata.normalize('NFKC', raw))
+                            for c in re.findall(r'\d{4,5}', m.group(1))})
     text = strip_page_headers(raw.replace('\f', '\n'))
 
     essays, mcq = [], []
@@ -299,8 +303,9 @@ def parse_mcq_by_position(path, has_essay, img_marks=False):
         else:
             cur['opts'][opt] += s
     for q in mcq:
-        if re.search(r'附圖|下圖|如圖|右圖|左圖|上圖|圖中|附表|下表|如表', q['q'] + ''.join(q['opts'])):
-            q['fig'] = True
+        if re.search(r'附圖|下圖|如圖|右圖|左圖|上圖|圖中|附表|下表|如表', q['q'] + ''.join(q['opts'])) \
+                or any(not o.strip() for o in q['opts']) or re.search('[\ue000-\uf8ff]', q['q'] + ''.join(q['opts'])):
+            q['fig'] = True                         # 有圖、選項是圖片（空白），或有讀不出來的特殊字
     return mcq
 
 
@@ -387,6 +392,19 @@ def parse_answers(path):
     m = re.search(r'試題代號[:：]\s*(\d+)', t)
     if m:
         info['code'] = m.group(1)
+    head = t[:t.find('類科') if '類科' in t[:800] else 400]  # 考試名稱裡的年度（可能有兩個：「108年…及108年…」）
+    info['years'] = sorted({int(y) for y in re.findall(r'(?<!\d)(\d{2,3})\s*年', head)})
+    lines0 = t.split('\n')                                  # 科目名稱：排版時可能在標籤的上一行、同一行或跨好幾行
+    for i, ln in enumerate(lines0):
+        if '科目名稱' in ln:
+            j0 = i - 1 if i and lines0[i - 1].strip() and not re.search(r'名稱[:：]', lines0[i - 1]) else i
+            blk = []
+            for ln2 in lines0[j0:i + 6]:
+                if re.search(r'題數|標準答案|題號', ln2):
+                    break
+                blk.append(re.sub(r'科目名稱[:：]?', '', ln2))
+            info['subject'] = ''.join(blk)
+            break
     ans = {}
     lines = t.split('\n')
     for i, ln in enumerate(lines):
@@ -427,9 +445,10 @@ def parse_answers(path):
 
 def build_law_matcher(index_path):
     idx = json.load(open(index_path, encoding='utf-8'))
-    names = sorted({l['n'] for l in idx['laws'] if not l['x']}, key=len, reverse=True)
-    extra = {'憲法': '中華民國憲法', '刑法': '中華民國刑法'}
-    alt = '|'.join(re.escape(n) for n in names + list(extra))
+    names = {l['n'] for l in idx['laws'] if not l['x']}
+    # 簡稱：「憲法增修條文第10條」不能被當成「憲法第10條」，所以全部名稱一起由長到短排
+    extra = {'憲法增修條文': '中華民國憲法增修條文', '增修條文': '中華民國憲法增修條文', '憲法': '中華民國憲法', '刑法': '中華民國刑法'}
+    alt = '|'.join(re.escape(n) for n in sorted(names | set(extra), key=len, reverse=True))
     num = r'(\d+|[零〇一二兩三四五六七八九十百千]+)'
     # 法規名稱可省略：「第 21 條」沿用前面最近提到的法規
     rx = re.compile(rf'({alt}|同法|本法)?(?:\s*第\s*{num}\s*條(?:\s*之\s*{num})?(?:\s*第\s*{num}\s*項)?)|({alt})')
@@ -464,11 +483,37 @@ def build_law_matcher(index_path):
     return find
 
 
-def build_paper(qpdf, apdf, find):
-    """解析一份試卷（apdf 可為 None：純申論）。回傳 (paper, problems)。problems 為空代表通過檢查。"""
+def _norm_subject(s):
+    return re.sub(r'[\s（）()\[\]【】、，,・·:：;；]', '', unicodedata.normalize('NFKC', s or ''))
+
+
+def check_pair(paper, ans, expect_subject=None, expect_year=None):
+    """確認答案檔和試題是同一份：年度要相同；再比試題代號，答案檔沒印代號時改比科目名稱。回傳問題說明或 None。"""
+    yr, ay = expect_year or paper.get('year'), ans.get('years') or []
+    if yr and ay and yr not in ay:
+        return f'答案檔是 {"、".join(map(str, ay))} 年的，這份試題是 {yr} 年，可能配錯答案'
+    ac, qc = ans.get('code'), set(paper.get('codes') or [])
+    if ac and qc:
+        return None if ac in qc else f'答案檔的試題代號 {ac} 跟試題上的代號（{"、".join(sorted(qc)[:6])}）對不上，可能配錯答案'
+    want, got = _norm_subject(expect_subject), _norm_subject(ans.get('subject'))
+    if want and got:
+        return None if (want in got or (len(got) >= 4 and got in want)) else \
+            f'答案檔的科目「{(ans.get("subject") or "").strip()[:30]}」跟這份試題不同，可能配錯答案'
+    if ac or qc:                                   # 只有一邊有代號、又沒有科目名稱可比：無法確認，但也沒有矛盾
+        return None
+    return '答案檔沒有試題代號也沒有科目名稱，無法確認是同一份試題'
+
+
+def build_paper(qpdf, apdf, find, expect_subject=None, expect_year=None):
+    """解析一份試卷（apdf 可為 None：純申論）。回傳 (paper, problems)。problems 為空代表通過檢查。
+    expect_subject：官方清單上的科目名稱，答案檔沒印試題代號時用來確認配對。"""
     paper = parse_questions(qpdf)
     ans = parse_answers(apdf) if apdf else {'answers': {}, 'ranges': []}
     problems = []
+    if apdf and paper['mcq']:
+        why = check_pair(paper, ans, expect_subject, expect_year)
+        if why:
+            problems.append(why)
     if ans.get('code'):                            # 以答案檔的試題代號為準（試卷上常有多個代號）
         paper['code'] = ans['code']
     paper['exam'] = ans.get('exam', paper.get('title', ''))
@@ -480,8 +525,11 @@ def build_paper(qpdf, apdf, find):
         q['multi'] = bool(rg and rg['kind'] == 'multi') or bool(q['ans'] and re.fullmatch(r'[A-E]{2,5}', q['ans']))
         q['pts'] = rg['pts'] if rg else None
         q['refs'] = find(q['q'] + ' ' + ' '.join(q['opts']))
+    def ans_fits(q):                               # 答案的字母不能超出選項數（例如只有 4 個選項卻答 E）
+        return all('ABCDE'.index(c) < len(q['opts']) for c in re.findall(r'[A-E]', q['ans'] or ''))
     bad = [q['no'] for q in paper['mcq']
-           if len(q['opts']) not in (4, 5) or (not q['multi'] and len(q['opts']) != 4) or not q['ans'] or q['ans'] == '#']
+           if len(q['opts']) not in (4, 5) or (not q['multi'] and len(q['opts']) != 4) or not q['ans'] or q['ans'] == '#'
+           or not ans_fits(q)]
     if bad and len(bad) <= max(1, len(paper['mcq']) // 10) and len(paper['mcq']) >= 5:
         for q in paper['mcq']:                     # 一成以內的題目有問題：標示後照樣上架
             if q['no'] in bad:
@@ -491,9 +539,12 @@ def build_paper(qpdf, apdf, find):
         paper['broken'] = bad
     elif bad:
         problems.append(f'第 {bad[:10]} 題選項或答案不完整')
-    if apdf and len(ans['answers']) != len(paper['mcq']) and not (
-            paper.get('broken') and abs(len(ans['answers']) - len(paper['mcq'])) <= len(paper['broken'])):
-        problems.append(f'答案 {len(ans["answers"])} 題，試題解析出 {len(paper["mcq"])} 題')
+    # 題號要一一對上（不只是題數相同）：答案檔有第 1～N 題，試題也要剛好是第 1～N 題
+    off = set(ans['answers']) ^ {q['no'] for q in paper['mcq']}
+    if apdf and off and not (paper.get('broken') and len(off) <= len(paper['broken'])):
+        problems.append(f'答案 {len(ans["answers"])} 題，試題解析出 {len(paper["mcq"])} 題'
+                        + (f'（題號對不上：{sorted(off)[:8]}）' if len(ans['answers']) == len(paper['mcq']) else ''))
+    paper.pop('codes', None)
     if not paper['mcq'] and not paper['essays']:
         problems.append('解析不出任何題目（可能是掃描檔）')
     return paper, problems

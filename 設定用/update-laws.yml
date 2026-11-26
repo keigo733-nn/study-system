@@ -1,0 +1,89 @@
+name: 更新法規
+
+on:
+  schedule:
+    - cron: '43 19 * * 0'       # 每週一凌晨 3:43（臺灣時間）；法務部資料每月更新，每週檢查一次就夠
+  workflow_dispatch:             # 也可以在 Actions 頁面手動按 Run workflow
+
+permissions:
+  contents: write
+
+concurrency:
+  group: law-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 下載全國法規資料庫（法律）
+        run: |
+          ok=""
+          for url in "https://law.moj.gov.tw/api/ch/law/json" "https://law.moj.gov.tw/api/ch/law/xml"; do
+            echo "嘗試 $url"
+            if curl -fsSL --retry 3 --retry-delay 10 -A "Mozilla/5.0 (study-system law updater)" -o /tmp/law.zip "$url" \
+               && [ "$(head -c 2 /tmp/law.zip)" = "PK" ]; then ok=1; echo "下載成功（$(du -h /tmp/law.zip | cut -f1)）"; break; fi
+          done
+          if [ -z "$ok" ]; then
+            # 法務部網站連不上時的備案：手動把下載的 zip 或 FalV.xml 放在 data/ 裡
+            for f in data/ChLaw.zip data/FalV.xml; do
+              if [ -f "$f" ]; then
+                cp "$f" /tmp/law.zip; ok=1
+                echo "::warning::法務部網站連不上，這次改用專案裡的備案檔 $f。這份檔案不會自己變新，法規可能是舊的；請照 README「法規更新失敗時」重新下載上傳。"
+                echo "⚠️ 法務部網站連不上，使用備案檔 \`$f\`，法規可能不是最新的。" >> "$GITHUB_STEP_SUMMARY"
+                break
+              fi
+            done
+          fi
+          [ -n "$ok" ] || { echo "::error::下載不到法規資料，請看 README 的「法規更新失敗時」"; exit 1; }
+
+      - name: 轉換與比對
+        id: build
+        run: |
+          python3 tools/build_laws.py /tmp/law.zip /tmp/laws_new --min=1000
+          python3 - <<'PY'
+          import json, os
+          new = json.load(open('/tmp/laws_new/index.json', encoding='utf-8'))
+          try:
+              old = json.load(open('docs/laws/index.json', encoding='utf-8'))
+          except FileNotFoundError:
+              old = {'laws': [], 'updated': '（第一次）'}
+          od = {l['p']: l for l in old['laws']}
+          changed = [l for l in new['laws'] if l['p'] in od and od[l['p']]['d'] != l['d']]
+          added = [l for l in new['laws'] if l['p'] not in od]
+          same = not changed and not added and old.get('laws') == new['laws']
+          lines = [f"資料日期：{old.get('updated', '')} → {new['updated']}",
+                   f"修正 {len(changed)} 部、新增 {len(added)} 部"]
+          lines += [f"- {l['n']}（{l['d']}）" for l in sorted(changed, key=lambda l: l['d'], reverse=True)[:50]]
+          text = '\n'.join(lines)
+          print(text)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+              f.write('### 法規更新\n\n' + text + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"same={'1' if same else ''}\n")
+          PY
+
+      - name: 存回專案（GitHub Pages 會自動更新網站）
+        if: steps.build.outputs.same != '1'
+        run: |
+          mkdir -p docs/laws
+          rsync -a --delete /tmp/laws_new/ docs/laws/
+          cp docs/laws/index.json laws/index.json
+          touch docs/.nojekyll
+          git config user.name "law-bot"
+          git config user.email "law-bot@users.noreply.github.com"
+          git add -A docs/laws laws docs/.nojekyll
+          if git diff --cached --quiet; then echo "沒有變更"; exit 0; fi
+          git commit -q -m "法規更新 $(date -u +%F)"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -q && git push -q && exit 0
+            echo "推送衝突，重試 $i"; sleep 20
+          done
+          exit 1
