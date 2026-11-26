@@ -34,7 +34,12 @@ jobs:
           if [ -z "$ok" ]; then
             # 法務部網站連不上時的備案：手動把下載的 zip 或 FalV.xml 放在 data/ 裡
             for f in data/ChLaw.zip data/FalV.xml; do
-              if [ -f "$f" ]; then cp "$f" /tmp/law.zip; ok=1; echo "法務部網站連不上，改用 $f"; break; fi
+              if [ -f "$f" ]; then
+                cp "$f" /tmp/law.zip; ok=1
+                echo "::warning::法務部網站連不上，這次改用專案裡的備案檔 $f。這份檔案不會自己變新，法規可能是舊的；請照 README「法規更新失敗時」重新下載上傳。"
+                echo "⚠️ 法務部網站連不上，使用備案檔 \`$f\`，法規可能不是最新的。" >> "$GITHUB_STEP_SUMMARY"
+                break
+              fi
             done
           fi
           [ -n "$ok" ] || { echo "::error::下載不到法規資料，請看 README 的「法規更新失敗時」"; exit 1; }
