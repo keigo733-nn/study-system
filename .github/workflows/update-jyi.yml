@@ -1,0 +1,42 @@
+name: 更新大法官解釋
+
+on:
+  schedule:
+    - cron: '23 18 * * 6'       # 每週日凌晨 2:23（臺灣時間）；已抓好的不會重抓，幾秒就結束
+  workflow_dispatch:             # 第一次請到 Actions 頁面手動按 Run workflow（約 30 分鐘）
+
+permissions:
+  contents: write
+
+concurrency:
+  group: jyi-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 抓大法官解釋（憲法法庭網站）
+        run: |
+          python3 -u tools/build_jyi.py --laws laws/index.json --out docs/jyi --sleep 1.5 --minutes 100
+          touch docs/.nojekyll
+
+      - name: 存回專案（GitHub Pages 會自動更新網站）
+        run: |
+          git config user.name "jyi-bot"
+          git config user.email "jyi-bot@users.noreply.github.com"
+          git add -A docs/jyi docs/.nojekyll
+          if git diff --cached --quiet; then echo "沒有變更"; exit 0; fi
+          git commit -q -m "大法官解釋更新 $(date -u +%F)"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -q && git push -q && exit 0
+            echo "推送衝突，重試 $i"; sleep 20
+          done
+          echo "::error::推送失敗 5 次，這次的成果沒有存回專案"; exit 1
