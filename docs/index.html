@@ -1454,7 +1454,7 @@ __M["qmeta"] = { get CAUSES() { return CAUSES; }, get CAUSE_NAME() { return CAUS
 /* ===== exam.js ===== */
 (() => {
 /* ---------- 回報：寄到館長的信箱（Web3Forms，跟白紙書房共用同一把金鑰）。金鑰空白時不顯示回報按鈕 ---------- */
-const WEB3FORMS_KEY = '';
+const WEB3FORMS_KEY = '8fd246af-b4a8-4458-82d5-edce492075ec';
 const RPT_MAX = 5;                                   // 每台裝置每天最多 5 則，避免洗版
 function rptLeft() {
   try { const k = 'rpt:' + new Date().toISOString().slice(0, 10); return RPT_MAX - (+localStorage.getItem(k) || 0); } catch (e) { return RPT_MAX; }
