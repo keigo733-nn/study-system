@@ -176,6 +176,15 @@ kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:.72re
 .verdict{font-size:.9rem;margin-top:6px;font-weight:700}
 .official{font-size:.8rem;margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}.official .muted{font-size:.75rem}.verdict.ok{color:var(--ok)}.verdict.no{color:var(--no)}
 .refrow{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:.82rem;color:var(--sub)}
+details.inl{display:inline}details.inl>summary{display:inline;cursor:pointer;color:var(--accent,#3b5b92)}details.inl[open]{display:block}
+details.essays>summary{display:flex;align-items:baseline;gap:10px;cursor:pointer;list-style:none}details.essays>summary::-webkit-details-marker{display:none}details.essays>summary h2::before{content:'▸ ';}details.essays[open]>summary h2::before{content:'▾ '}
+.mixbar{margin-top:10px;padding:10px 12px;border:1px dashed var(--line);border-radius:10px}
+.mixchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.mixchips .chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:4px 12px;cursor:pointer;font:inherit;font-size:.88em;color:inherit}
+.mixchips .chip.on{background:var(--accent,#3b5b92);border-color:var(--accent,#3b5b92);color:#fff}.mixchips .chip:disabled{opacity:.5;cursor:default}
+h2.sec.part{border-left:4px solid var(--accent,#3b5b92);padding-left:8px}
+.mockbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:10px;padding:10px 12px;border-radius:10px;background:var(--bg)}
+#mockClock{font-variant-numeric:tabular-nums;font-weight:700;font-size:1.15em}#mockClock.late{color:#c0392b}
+.mockres .mr-big{font-size:1.2em;margin:6px 0}.mockres .mr-big b{font-size:2em}
 .score{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 0;font-weight:700}
 
 /* 考古題清單 */
@@ -455,6 +464,7 @@ input[type=checkbox],input[type=radio],input[type=range]{accent-color:var(--red)
 .wctl+.sctl+.cd,.sctl+.cd{margin-top:0}
 @media (max-width:700px){.sctl{display:none}}
 .pctl fieldset label.row{flex-wrap:nowrap;align-items:flex-start;gap:6px}.pctl fieldset label.row input[type=checkbox]{flex:none;margin-top:.3em}
+.clspick .row{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0}.clspick select,.clspick input{flex:1 1 160px;min-width:0}
 /* 考前筆記 */
 .ed-cover{text-align:center;padding-top:40mm}
 .ed-t{font-family:var(--serif);font-size:2.4em;font-weight:700;letter-spacing:.12em}
@@ -1078,7 +1088,7 @@ __M["laws"] = { get INDEX() { return INDEX; }, get isEmbedded() { return isEmbed
 const db = __M["db"];
 const { $, esc, toast, twoStep, dateStr } = __M["util"];
 
-const DEFAULTS = { examName: '', examDate: '', subjects: ['國文', '憲法', '行政法', '民法', '刑法'], margin: 'left', fontSize: 11 };
+const DEFAULTS = { examName: '', examDate: '', examLevel: '', examClass: '', examFam: '', subjects: [], margin: 'left', fontSize: 11 };
 let cache = null;
 async function settings() {
   if (cache) return cache;
@@ -1100,7 +1110,8 @@ async function mount(view) {
       <label>考試名稱<input id="sExam" value="${esc(s.examName)}" placeholder="例如：116年高考三級 法制"></label>
       <label>考試日期<input id="sDate" type="date" value="${esc(s.examDate)}"></label>
       ${window.BANK_URL && !s.bankUrl ? '' : `<label class="wide">題庫網址（進階：要改用別的題庫來源才需要填）<input id="sBank" value="${esc(s.bankUrl || '')}" placeholder="${esc(window.BANK_URL || 'https://帳號.github.io/study-system/exams/')}"></label>`}
-      <label class="wide">考科（一行一科；考古題「只看我的考科」會用科目名稱比對）<textarea id="sSubj" rows="7">${esc(s.subjects.join('\n'))}</textarea></label>
+      <div class="wide" id="sClass"></div>
+      <label class="wide">考科（選好類組會自動帶入，也可以自己改；一行一科）<textarea id="sSubj" rows="7">${esc(s.subjects.join('\n'))}</textarea></label>
     </div>
     <button class="btn primary" id="sSave" type="button">儲存</button>
   </section>
@@ -1139,9 +1150,10 @@ async function mount(view) {
   </section>`;
   $('#sSave').onclick = async () => {
     const subjects = $('#sSubj').value.split('\n').map(x => x.trim()).filter(Boolean);
-    await saveSettings({ bankUrl: $('#sBank') ? $('#sBank').value.trim() : (s.bankUrl || ''), examName: $('#sExam').value.trim(), examDate: $('#sDate').value, subjects: subjects.length ? subjects : DEFAULTS.subjects });
+    await saveSettings({ bankUrl: $('#sBank') ? $('#sBank').value.trim() : (s.bankUrl || ''), examName: $('#sExam').value.trim(), examDate: $('#sDate').value, subjects });
     toast('已儲存');
   };
+  __M['exam'].classPicker($('#sClass'), s, ({ level, cls, subjects }) => { $('#sSubj').value = subjects.join('\n'); toast(`已帶入${level}・${cls}的 ${subjects.length} 個考科`); }).catch(() => {});
   const info = async () => {
     const n = (await db.all('notes')).length, a = (await db.all('answers')).length, b = await db.backupStatus();
     let kept = '';
@@ -1652,6 +1664,64 @@ async function draw() {
   if (view === 'wrong') return drawWrong();
 }
 
+/* ---------- 我的類組：選「等級＋類科」，列出這個類組真正要考的科目 ---------- */
+const normCls = c => (c || '').replace(/\s/g, '').replace(/類科$|類$/, '');
+const normSubj = t => (t || '').replace(/[（(][^）)]*[）)]/g, '').replace(/\s/g, '');
+// 考試種類：同一場可能是好幾種特考合辦（例如地特＋離島特考），名稱全部保留，讓考生看得出來
+// 一場考試可能是好幾種特考合辦（例如「關務＋身心障礙」），拆成各自的考試名稱
+const famsOf = p => [...new Set(p.exam[2].split(/、|及(?=\d+年)/).map(x => x.replace(/^\d+年/, '').replace(/^(公務人員)?特種考試/, '').replace(/(公務人員)?考試$/, '').trim()).filter(Boolean))];
+const famOf = p => famsOf(p).join('＋');
+const inClass = (p, level, cls, fam) => (!level || p.levels.includes(level)) && (!fam || famsOf(p).includes(fam)) && p.classes.some(c => normCls(c) === normCls(cls));
+function classFamilies(level, cls) {
+  const m = new Map(); for (const r of IDX.papers) { const p = row(r); if (inClass(p, level, cls)) for (const f of famsOf(p)) { const x = m.get(f) || { f, n: 0, y: 0 }; x.n++; x.y = Math.max(x.y, p.exam[1]); m.set(f, x); } }
+  return [...m.values()].sort((a, b) => b.n - a.n);
+}
+function classList(level) {
+  const top = Math.max(...IDX.exams.map(e => e[1])), n = new Map();
+  for (const r of IDX.papers) { const p = row(r); if (p.exam[1] < top - 3 || (level && !p.levels.includes(level))) continue; for (const c of p.classes) { const k = normCls(c); n.set(k, (n.get(k) || 0) + 1); } }
+  return [...n.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
+}
+function classSubjects(level, cls, fam) {
+  const ps = IDX.papers.map(row).filter(p => inClass(p, level, cls, fam));
+  if (!ps.length) return { year: 0, subjects: [] };
+  const year = Math.max(...ps.map(p => p.exam[1]));
+  const out = []; for (const p of ps) if (p.exam[1] === year) { const t = normSubj(p.subject); if (t && !out.includes(t)) out.push(t); }
+  const first = t => /^國文/.test(t) ? 0 : /^(法學|公民|憲法)/.test(t) ? 1 : 2;
+  return { year, subjects: out.sort((a, b) => first(a) - first(b)) };
+}
+/** 類組選擇器：box 放進去，onPick({level, cls, subjects}) */
+async function classPicker(box, s, onPick) {
+  if (!box) return; if (!IDX) await loadIndex();
+  const levels = (IDX.levels ? [...IDX.levels] : [...new Set(IDX.exams.map(e => e[3]))]).filter(l => lvRank(l) < 99).sort((a, b) => lvRank(a) - lvRank(b));
+  box.innerHTML = `<div class="clspick"><b>我的考試類組</b>
+    <div class="row"><select id="cpLv" aria-label="等級"><option value="">選等級</option>${levels.map(l => `<option${l === s.examLevel ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
+    <input id="cpCls" list="cpList" placeholder="類科，例如：一般行政" value="${esc(s.examClass || '')}" aria-label="類科"><datalist id="cpList"></datalist>
+    <select id="cpFam" aria-label="考試" hidden></select>
+    <button class="btn primary" id="cpGo" type="button">帶入考科</button></div><p class="small muted" id="cpMsg">選好等級和類科，會列出最近一年這個類組實際考的科目。</p></div>`;
+  const fill = () => { $('#cpList', box).innerHTML = classList($('#cpLv', box).value).slice(0, 400).map(c => `<option value="${esc(c)}">`).join(''); };
+  const fams = () => {
+    const sel = $('#cpFam', box), lv = $('#cpLv', box).value, c = normCls($('#cpCls', box).value.trim());
+    const fs = lv && c ? classFamilies(lv, c) : [];
+    sel.hidden = fs.length < 2;
+    sel.innerHTML = fs.map(x => `<option value="${esc(x.f)}"${x.f === s.examFam ? ' selected' : ''}>${esc(x.f)}（到 ${x.y} 年）</option>`).join('');
+  };
+  fill(); fams();
+  $('#cpLv', box).onchange = () => { fill(); fams(); };
+  $('#cpCls', box).addEventListener('change', fams); $('#cpCls', box).addEventListener('input', fams);
+  $('#cpGo', box).onclick = async () => {
+    const level = $('#cpLv', box).value, cls = normCls($('#cpCls', box).value.trim()), msg = $('#cpMsg', box);
+    if (!level || !cls) { msg.textContent = '請先選等級，再填類科。'; return; }
+    const fam = $('#cpFam', box).hidden ? '' : $('#cpFam', box).value;
+    const { year, subjects } = classSubjects(level, cls, fam);
+    if (!subjects.length) { msg.textContent = `題庫裡找不到「${level}・${cls}」。換個寫法試試，例如輸入前兩個字，從清單裡選。`; return; }
+    await __M['settings'].saveSettings({ examLevel: level, examClass: cls, examFam: fam, subjects });
+    msg.innerHTML = `${year} 年${fam ? esc(fam) : ''}${esc(level)}・${esc(cls)}考 ${subjects.length} 科：<b>${subjects.map(esc).join('、')}</b>`;
+    const joint = fam && IDX.papers.map(row).some(p => p.exam[1] === year && inClass(p, level, cls, fam) && famsOf(p).length > 1);
+    if (joint) msg.innerHTML += '<br>這場是幾種考試合辦的，科目可能混在一起。不是你要考的，可以在下面「考科」裡刪掉。';
+    onPick?.({ level, cls, subjects, year });
+  };
+}
+
 async function drawList() {
   const s = await settings();
   const years = [...new Set(IDX.exams.map(e => e[1]))].sort((a, b) => b - a);
@@ -1661,8 +1731,9 @@ async function drawList() {
       <select id="fLevel" aria-label="考試"><option value="">全部考試</option>${levels.map(l => `<option${l === F.level ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
       <input id="fCls" list="clsList" placeholder="類科" value="${esc(F.cls)}" aria-label="類科"><datalist id="clsList">${IDX.classes.slice(0, 3000).map(c => `<option value="${esc(c)}">`).join('')}</datalist>
       <input id="fQ" type="search" placeholder="科目關鍵字" value="${esc(F.q)}" aria-label="科目">
-      <label class="row small"><input type="checkbox" id="fMine"${F.mine ? ' checked' : ''}> 只看我的考科（${esc(s.subjects.join('、'))}）</label>
-    </div><div id="pl"></div>`;
+      ${s.examClass || s.subjects.length ? `<label class="row small"><input type="checkbox" id="fMine"${F.mine ? ' checked' : ''}> ${s.examClass ? `只看我的類組（${s.examFam ? esc(s.examFam) + '・' : ''}${esc(s.examLevel)}・${esc(s.examClass)}）` : `只看我的考科（${esc(s.subjects.join('、'))}）`}</label>` : '<input type="checkbox" id="fMine" hidden>'}
+    </div>${s.examClass || s.subjects.length ? '' : '<div class="card" id="plPick"></div>'}<div id="pl"></div>`;
+  if ($('#plPick')) classPicker($('#plPick'), s, () => drawList());
   const re = () => { shown = PAGE; F.year = $('#fYear').value; F.level = $('#fLevel').value; F.cls = $('#fCls').value.trim(); F.q = $('#fQ').value.trim(); F.mine = $('#fMine').checked; drawRows(s); };
   ['fYear', 'fLevel', 'fMine'].forEach(id => $('#' + id).onchange = re);
   ['fCls', 'fQ'].forEach(id => $('#' + id).oninput = re);
@@ -1674,7 +1745,7 @@ async function drawRows(s) {
   const list = IDX.papers.map(row).filter(p =>
     (!F.year || String(p.exam[1]) === F.year) && (!F.level || p.levels.includes(F.level)) &&
     (!F.cls || p.classes.some(c => c.includes(F.cls))) && (!F.q || p.subject.includes(F.q)) &&
-    (!F.mine || subj.some(x => p.subject.replace(/\s/g, '').includes(x))));
+    (!F.mine || (s.examClass ? inClass(p, s.examLevel, s.examClass, s.examFam) : !subj.length || subj.some(x => p.subject.replace(/\s/g, '').includes(x)))));
   $('#pl').innerHTML = list.length ? list.slice(0, shown).map(p => {
     const a = answered[p.id], n = a ? Object.keys(a).length : 0;
     return `<button type="button" class="prow" data-id="${p.id}">
@@ -1713,29 +1784,108 @@ function qBlock(q, pick, cur, opts = {}) {
     ${pick ? `<div class="hvbox" data-pid="${esc(opts.pid || paper.id)}" data-no="${q.no}"><button type="button" class="btn small hvopen">✎ 收成筆記</button></div></div>` : ''}
     ${opts.retry ? `<button type="button" class="btn small retry">再練一次</button>` : ''}</div>`;
 }
+/* ---------- 混合科目分段：法學知識與英文 → 憲法／法緒／英文 ---------- */
+const isEng = q => { const t = q.q + q.opts.join(''); return (t.match(/[A-Za-z]/g) || []).length > (t.match(/[\u4e00-\u9fff]/g) || []).length; };
+const RE_CON = /憲法|釋字|大法官|憲判字|增修條文|總統|立法院|立法委員|監察院|考試院|司法院|行政院|國民大會|基本權|基本國策|地方自治|公民投票|政黨|罷免|國家機關|權力分立|覆議|彈劾|不信任案/;
+const RE_OTH = /民法|刑法|勞動基準|勞基法|公司法|行政程序|消費者|著作權|個人資料|性別|家庭暴力|遺囑|繼承|契約|債權|物權|法律解釋|解釋方法|法源|習慣|公法|私法|法規|中央法規標準|商標|專利|動產|不動產|勞工|法人|時效|強制執行|法制史|統治時期|原住民|兩岸|大陸地區/;
+const PCACHE = new Map();
+function partsOf(p) {
+  if (PCACHE.has(p.id)) return PCACHE.get(p.id);
+  const sub = (p.subject || '').replace(/\s/g, ''); let res = null;
+  if (p.mcq.length && /英文|法學緒論/.test(sub) && /法|憲|公民/.test(sub) && !/以英文命題/.test(sub)) {
+    const eng = /英文/.test(sub) ? p.mcq.filter(isEng) : [], rest = p.mcq.filter(q => !eng.includes(q)), g = [];
+    const second = /法學緒論/.test(sub) ? (/兩岸/.test(sub) ? '法緒＋兩岸' : '法緒') : /原住民族行政及法規/.test(sub) ? '原民法規' : null;
+    if (/憲法/.test(sub) && second && rest.length > 4) {
+      const sc = rest.map(q => RE_CON.test(q.q) ? 1 : RE_OTH.test(q.q) ? -1 : 0), half = rest.length / 2;
+      let k = 0, best = -1e9;
+      for (let i = 0; i <= rest.length; i++) { const v = sc.slice(0, i).reduce((a, b) => a + b, 0) - sc.slice(i).reduce((a, b) => a + b, 0) - Math.abs(i - half) * 1e-3; if (v > best) { best = v; k = i; } }
+      g.push(['憲法', rest.slice(0, k)], [second, rest.slice(k)]);
+    } else if (rest.length) g.push([/公民/.test(sub) ? '公民' : /憲法/.test(sub) ? '憲法' : '法科', rest]);
+    if (eng.length) g.push(['英文', eng]);
+    const parts = g.filter(x => x[1].length);
+    if (parts.length > 1) res = { parts, of: Object.fromEntries(parts.flatMap(([n, qs]) => qs.map(q => [q.no, n]))), eng: eng.length > 0 };
+  }
+  PCACHE.set(p.id, res); return res;
+}
+const range = qs => { const n = qs.map(q => q.no); return Math.min(...n) === Math.max(...n) ? `${n[0]}` : `${Math.min(...n)}–${Math.max(...n)}`; };
+let mixPart = (() => { try { return localStorage.getItem('mixPart') || 'law'; } catch (e) { return 'law'; } })();
+const visibleQs = (p, P) => !P ? p.mcq : mixPart === 'all' ? p.mcq : mixPart === 'law' ? (P.eng ? p.mcq.filter(q => P.of[q.no] !== '英文') : p.mcq) : P.parts.some(x => x[0] === mixPart) ? p.mcq.filter(q => P.of[q.no] === mixPart) : p.mcq;
+
+/* ---------- 模擬考：計時、作答時不顯示對錯，交卷才一起批改 ---------- */
+let mock = null;   // { pid, start, limit(分鐘，0=不計時), timer }
+function startMock(min) { mock = { pid: paper.id, start: Date.now(), limit: min, ans: {} }; pending = {}; drawPaper(); tick(); window.scrollTo({ top: 0 }); }
+function tick() {
+  clearInterval(tick.t);
+  tick.t = setInterval(() => {
+    const el = $('#mockClock'); if (!mock || !el) { clearInterval(tick.t); return; }
+    const used = (Date.now() - mock.start) / 1000, left = mock.limit * 60 - used;
+    const f = x => `${Math.floor(x / 60)}:${String(Math.floor(x % 60)).padStart(2, '0')}`;
+    el.textContent = mock.limit ? `剩 ${f(Math.max(0, left))}` : `已用 ${f(used)}`;
+    el.classList.toggle('late', mock.limit && left < 300);
+    if (mock.limit && left <= 0) { clearInterval(tick.t); toast('時間到，自動交卷'); submitMock(); }
+  }, 1000);
+}
+async function submitMock() {
+  if (!mock) return;
+  const P = partsOf(paper), qs = visibleQs(paper, P), used = Math.round((Date.now() - mock.start) / 60000);
+  for (const q of qs) { const k = mock.ans[q.no] || pending[q.no]; if (k) await answer(paper, q, k); }
+  const res = { used, limit: mock.limit, rows: [] }, by = {};
+  for (const q of qs) { const n = P?.of[q.no] || '全部', k = mock.ans[q.no] || pending[q.no]; const x = by[n] ??= { n, all: 0, done: 0, right: 0, pts: 0, max: 0 }; x.all++; x.max += q.pts || 0; if (k) { x.done++; if (isCorrect(q, k)) { x.right++; x.pts += q.pts || 0; } } }
+  res.rows = Object.values(by); clearInterval(tick.t); mock = null; pending = {}; lastMock = res; drawPaper(); window.scrollTo({ top: 0 });
+}
+let lastMock = null;
+function mockReport() {
+  const r = lastMock; if (!r) return ''; lastMock = null;
+  const T = r.rows.reduce((a, x) => ({ all: a.all + x.all, right: a.right + x.right, pts: a.pts + x.pts, max: a.max + x.max }), { all: 0, right: 0, pts: 0, max: 0 });
+  return `<div class="card mockres"><h2>模擬考成績</h2><div class="mr-big">${T.max ? `<b>${+T.pts.toFixed(1)}</b> / ${+T.max.toFixed(1)} 分` : `<b>${T.right}</b> / ${T.all} 題`}</div>
+    <p class="muted small">用了 ${r.used} 分鐘${r.limit ? `（限時 ${r.limit} 分鐘）` : ''}。答錯和沒寫的題目都在下面，錯的已經收進錯題本。</p>
+    ${r.rows.length > 1 ? `<table class="ptable"><tbody>${r.rows.map(x => `<tr><td>${esc(x.n)}</td><td>答對 ${x.right} / ${x.all} 題</td><td>${x.max ? `${+x.pts.toFixed(1)} / ${+x.max.toFixed(1)} 分` : Math.round(x.right / x.all * 100) + '%'}</td></tr>`).join('')}</tbody></table>` : ''}</div>`;
+}
+
 function drawPaper() {
   const out = $('#exOut');
+  const P = partsOf(paper), inMock = mock && mock.pid === paper.id, vis = visibleQs(paper, P);
   let html = `<div class="card"><button class="btn small" type="button" id="back">◀ 回試卷清單</button>
     <h2 class="mt">${esc(paper.year)}年 ${esc(paper.subject)}</h2>
-    <p class="muted small">${esc(paper.exam)}｜${esc(paper.level)}${paper.code ? `｜試題代號 ${esc(paper.code)}` : ''}${paper.fixed ? '｜<b>已採用更正答案</b>' : ''}<br>適用類科：${esc((paper.classes || []).join('、'))}</p>
-    <div class="row"><button class="btn small ghost" id="reset" type="button">清除作答</button></div></div>`;
-  if (paper.essays.length) html += `<h2 class="sec">申論題</h2>` + paper.essays.map(e => `<div class="exq">${e.passage ? `<details class="passage" open><summary>共同引文</summary><div class="pre">${esc(e.passage)}</div></details>` : ''}<div class="pre"><b class="qn">${'一二三四五六七八九十'[e.no - 1] || e.no}、</b>${esc(e.text)}</div>${e.broken ? `<div class="fignote">這題有部分文字是圖片，系統讀不到${paper.source ? `，<a href="${esc(paper.source)}" target="_blank" rel="noopener">開啟原始試卷 PDF ↗</a>` : ''}</div>` : ''}${chips(e.refs)}</div>`).join('');
+    <p class="muted small">${esc(paper.exam)}｜${esc(paper.level)}${paper.code ? `｜試題代號 ${esc(paper.code)}` : ''}${paper.fixed ? '｜<b>已採用更正答案</b>' : ''}<br>適用類科：${(c => c.length > 6 ? `${esc(c.slice(0, 6).join('、'))} <details class="inl"><summary>等 ${c.length} 類科</summary>${esc(c.join('、'))}</details>` : esc(c.join('、')))(paper.classes || [])}</p>
+    ${inMock ? `<div class="mockbar"><b>模擬考進行中</b><span id="mockClock">…</span><span class="muted small">作答時不顯示對錯</span><button class="btn small primary" id="mockEnd" type="button">交卷</button><button class="btn small ghost" id="mockQuit" type="button">放棄</button></div>`
+      : `<div class="row">${vis.length ? `<button class="btn small primary" id="mockGo" type="button">▶ 模擬考${paper.essays.length ? '（只考選擇題）' : ''}</button>` : ''}${vis.length ? '' : '<!--'}<select id="mockMin" aria-label="時間">${[[60, '限時 60 分鐘'], [90, '限時 90 分鐘'], [120, '限時 120 分鐘'], [0, '不計時']].map(([v, t]) => `<option value="${v}"${v === 60 ? ' selected' : ''}>${t}</option>`).join('')}</select>${vis.length ? '' : '-->'}<button class="btn small ghost" id="reset" type="button">清除作答</button></div>`}
+    ${P ? `<div class="mixbar"><div class="small">這份是混合科目：${P.parts.map(([n, qs]) => `${esc(n)} 第 ${range(qs)} 題`).join('、')}。<span class="muted">分段依題目內容自動判斷，交界處可能差一兩題。</span></div>
+      <div class="mixchips">${[...(P.eng ? [['law', '只做法科（去掉英文）']] : []), ...P.parts.map(([n, qs]) => [n, `只做${n}（${qs.length}）`]), ['all', `全部 ${paper.mcq.length} 題`]].map(([k, t]) => `<button type="button" class="chip${(mixPart === k || (k === 'law' && !P.eng && false)) || (k === 'all' && !P.eng && mixPart === 'law') ? ' on' : ''}" data-mix="${esc(k)}"${inMock ? ' disabled' : ''}>${esc(t)}</button>`).join('')}</div></div>` : ''}
+    </div>${inMock ? '' : mockReport()}`;
+  if (paper.essays.length && !inMock) html += `<details class="essays"${paper.mcq.length ? '' : ' open'}><summary><h2 class="sec">申論題 ${paper.essays.length} 題</h2><span class="muted small">${paper.mcq.length ? '刷選擇題時先收起來，要寫再點開' : ''}</span></summary>` + paper.essays.map(e => `<div class="exq">${e.passage ? `<details class="passage" open><summary>共同引文</summary><div class="pre">${esc(e.passage)}</div></details>` : ''}<div class="pre"><b class="qn">${'一二三四五六七八九十'[e.no - 1] || e.no}、</b>${esc(e.text)}</div>${e.broken ? `<div class="fignote">這題有部分文字是圖片，系統讀不到${paper.source ? `，<a href="${esc(paper.source)}" target="_blank" rel="noopener">開啟原始試卷 PDF ↗</a>` : ''}</div>` : ''}${chips(e.refs)}</div>`).join('') + '</details>';
   let last = null, lastPassage = null;
-  html += paper.mcq.map(q => {
+  let lastPart = null;
+  const pk = q => inMock ? undefined : picks[q.no], cur = q => inMock ? (mock.ans[q.no] || pending[q.no] || '') : (pending[q.no] || '');
+  html += vis.map(q => {
     let head = '';
-    if (q.multi !== last) { head = `<h2 class="sec">${q.multi ? '複選題' : (paper.essays.length ? '測驗題' : '單選題')}${q.pts ? `（每題 ${q.pts} 分）` : ''}</h2>`; last = q.multi; }
+    if (P && P.of[q.no] !== lastPart) { head += `<h2 class="sec part">${esc(P.of[q.no])}</h2>`; lastPart = P.of[q.no]; last = null; }
+    if (q.multi !== last) { head += `<h2 class="sec">${q.multi ? '複選題' : (paper.essays.length ? '測驗題' : '單選題')}${q.pts ? `（每題 ${q.pts} 分）` : ''}</h2>`; last = q.multi; }
     const firstOfGroup = q.passage && q.passage !== lastPassage; lastPassage = q.passage || null;
-    return head + qBlock(q, picks[q.no], pending[q.no] || '', { passage: firstOfGroup, passageOpen: true });
+    return head + qBlock(q, pk(q), cur(q), { passage: firstOfGroup, passageOpen: true });
   }).join('');
-  if (paper.mcq.length) {
+  if (vis.length && inMock) {
+    const n = vis.filter(q => mock.ans[q.no] || pending[q.no]).length;
+    html += `<div class="score">模擬考・已作答 ${n}/${vis.length} 題 <button class="btn small primary" id="mockEnd2" type="button">交卷</button></div>`;
+  } else if (vis.length) {
     const pts = q => q.pts || 0;
-    const done = paper.mcq.filter(q => picks[q.no]), right = done.filter(q => isCorrect(q, picks[q.no]));
-    const hasPts = paper.mcq.some(q => q.pts);       // 答案檔有寫配分才算分數，否則顯示正確率
-    const tail = hasPts ? `約 ${+right.reduce((a, q) => a + pts(q), 0).toFixed(1)}/${+paper.mcq.reduce((a, q) => a + pts(q), 0).toFixed(1)} 分${paper.mcq.some(q => q.multi) ? '（複選題只算全對）' : ''}`
+    const done = vis.filter(q => picks[q.no]), right = done.filter(q => isCorrect(q, picks[q.no]));
+    const hasPts = vis.some(q => q.pts);       // 答案檔有寫配分才算分數，否則顯示正確率
+    const tail = hasPts ? `約 ${+right.reduce((a, q) => a + pts(q), 0).toFixed(1)}/${+vis.reduce((a, q) => a + pts(q), 0).toFixed(1)} 分${vis.some(q => q.multi) ? '（複選題只算全對）' : ''}`
       : done.length ? `正確率 ${Math.round(right.length / done.length * 100)}%` : '';
-    html += `<div class="score">已作答 ${done.length}/${paper.mcq.length} 題・答對 ${right.length} 題${tail ? '・' + tail : ''}</div>`;
+    html += `<div class="score">已作答 ${done.length}/${vis.length} 題・答對 ${right.length} 題${tail ? '・' + tail : ''}</div>`;
   }
   out.innerHTML = html;
+  $$('[data-mix]', out).forEach(b => b.onclick = () => { mixPart = b.dataset.mix; try { localStorage.setItem('mixPart', mixPart); } catch (e) {} drawPaper(); });
+  if (inMock) {
+    const end = e => twoStep(e.target, '確定交卷？再按一次', submitMock);
+    $('#mockEnd').onclick = end; $('#mockEnd2') && ($('#mockEnd2').onclick = end);
+    $('#mockQuit').onclick = e => twoStep(e.target, '放棄這次模擬考？', () => { clearInterval(tick.t); mock = null; pending = {}; drawPaper(); });
+    tick();
+    bindAnswer(out, () => drawPaper(), async (p, q, k) => { mock.ans[q.no] = k; delete pending[q.no]; });
+    return;
+  }
+  if ($('#mockGo')) $('#mockGo').onclick = () => startMock(+$('#mockMin').value);
   $('#back').onclick = () => { view = 'list'; draw(); };
   $('#reset').onclick = e => twoStep(e.target, '再按一次清除', async () => {   // 清作答但保留錯題本
     const rec = (await db.get('answers', paper.id)) || {}; picks = {}; pending = {};
@@ -1884,7 +2034,7 @@ async function openHarvest(box) {
   };
 }
 
-__M["exam"] = { get bankUrl() { return bankUrl; }, get tfetch() { return tfetch; }, get loadPaper() { return loadPaper; }, get isCorrect() { return isCorrect; }, get mount() { return mount; }, get qBlock() { return qBlock; }, get bankIndex() { return bankIndex; }, get pendingOf() { return pendingOf; }, get bindAnswer() { return bindAnswer; } };
+__M["exam"] = { get bankUrl() { return bankUrl; }, get tfetch() { return tfetch; }, get loadPaper() { return loadPaper; }, get isCorrect() { return isCorrect; }, get mount() { return mount; }, get qBlock() { return qBlock; }, get bankIndex() { return bankIndex; }, get pendingOf() { return pendingOf; }, get bindAnswer() { return bindAnswer; }, get classPicker() { return classPicker; }, get classSubjects() { return classSubjects; } };
 })();
 /* ===== freq.js ===== */
 (() => {
@@ -3402,6 +3552,7 @@ async function draw() {
   const week = active.filter(r => r.review.due > today && r.review.due <= addDays(today, 7)).length;
   const grad = all.filter(r => r.review?.done).length;
   const left = items.filter(x => !picks[x.r.k]).length;
+  if (!$('#rvSt')) return;                            // 載入題目時已經切到別頁
   $('#rvSt').textContent = `今天 ${session.length} 題・還剩 ${left} 題・未來 7 天 ${week} 題・已畢業 ${grad} 題`;
   const out = $('#rvOut');
   if (!session.length) {
@@ -3471,7 +3622,9 @@ const { dateStr, daysBetween, esc, toast } = __M["util"];
 const PAGES = { home, notes, laws: lawpage, exam, review, points, print, settings: settingsPage };
 let current = null;
 
+let navSeq = 0;                                      // 每切換一次分頁加 1：還在載入的舊分頁出錯時，不要把錯誤蓋到新分頁上
 async function go(name, param) {
+  const seq = ++navSeq;
   if (!PAGES[name]) name = 'home';
   hidePop();
   await current?.flush?.();
@@ -3484,7 +3637,7 @@ async function go(name, param) {
   view.scrollTop = 0; window.scrollTo(0, 0);
   review.badge();
   try { await current.mount(view, param); }
-  catch (e) { console.error(e); view.innerHTML = `<div class="card err">這一頁載入時出了問題：${e.message}</div>`; }
+  catch (e) { if (seq !== navSeq) return; console.error(e); view.innerHTML = `<div class="card err">這一頁載入時出了問題：${e.message}</div>`; }
 }
 
 /** 「#exam?subject=行政法」→ ['exam', {subject:'行政法'}]。給外部連結（白紙書房、影片說明欄）直達用 */
