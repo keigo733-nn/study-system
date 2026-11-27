@@ -68,7 +68,10 @@ def load_papers(csv_path, since):
             if not p:
                 p = papers[pid] = {'id': pid, 'year': year, 'code': code, 'exam': r['考試名稱'].strip(),
                                    'level': r['等級分類'].strip(), 'subject': subj, 'type': r['試題型態'].strip(),
-                                   'q_url': r['試題網址'].strip(), 'a_url': '', 'fixed': False, 'classes': []}
+                                   'q_url': r['試題網址'].strip(), 'a_url': '', 'fixed': False, 'classes': [], 'levels': []}
+            lv = r['等級分類'].strip()
+            if lv and lv not in p['levels']:           # 同一份試卷可能同時用在好幾個等級（例如高普考、地特三四五等）
+                p['levels'].append(lv)
             cls = r['類科組別'].strip()
             if cls and cls not in p['classes']:
                 p['classes'].append(cls)
@@ -114,7 +117,7 @@ def fetch(url, dest, mock_dir=None, tries=3):
 
 def compact(p, paper):
     """存檔前精簡：去掉解析用的暫存欄位，補上清單裡的正式資料。"""
-    out = {'id': p['id'], 'year': p['year'], 'exam': p['exam'], 'level': p['level'], 'subject': p['subject'],
+    out = {'id': p['id'], 'year': p['year'], 'exam': p['exam'], 'level': '、'.join(p.get('levels') or [p['level']]), 'subject': p['subject'],
            'code': paper.get('code', ''), 'type': p['type'], 'fixed': p['fixed'], 'classes': p['classes'],
            'source': p['q_url'], 'answer': p['a_url'], 'essays': paper['essays'], 'mcq': paper['mcq']}
     return out
@@ -122,7 +125,7 @@ def compact(p, paper):
 
 def write_index(out_dir, papers, state):
     ok = [p for p in papers if state.get(p['id'], {}).get('status') == 'ok']
-    exams, ex_i, cls_t, cls_i = [], {}, [], {}
+    exams, ex_i, cls_t, cls_i, lv_t, lv_i = [], {}, [], {}, [], {}
     rows = []
     for p in sorted(ok, key=lambda p: (-p['year'], p['code'], p['subject'])):
         if p['code'] not in ex_i:
@@ -132,11 +135,16 @@ def write_index(out_dir, papers, state):
             if c not in cls_i:
                 cls_i[c] = len(cls_t); cls_t.append(c)
             ci.append(cls_i[c])
+        li = []
+        for lv in p.get('levels') or [p['level']]:
+            if lv not in lv_i:
+                lv_i[lv] = len(lv_t); lv_t.append(lv)
+            li.append(lv_i[lv])
         st = state[p['id']]
-        rows.append([p['id'], ex_i[p['code']], p['subject'], st.get('nm', 0), st.get('ne', 0), 1 if p['fixed'] else 0, ci])
+        rows.append([p['id'], ex_i[p['code']], p['subject'], st.get('nm', 0), st.get('ne', 0), 1 if p['fixed'] else 0, ci, li])
     idx = {'updated': time.strftime('%Y-%m-%d %H:%M'), 'source': '考選部考畢試題',
-           'fields': ['id', 'exam', 'subject', 'nMcq', 'nEssay', 'fixed', 'classes'],
-           'exams': exams, 'classes': cls_t, 'papers': rows}
+           'fields': ['id', 'exam', 'subject', 'nMcq', 'nEssay', 'fixed', 'classes', 'levels'],
+           'exams': exams, 'classes': cls_t, 'levels': lv_t, 'papers': rows}
     with open(os.path.join(out_dir, 'index.json'), 'w', encoding='utf-8') as f:
         json.dump(idx, f, ensure_ascii=False, separators=(',', ':'))
     write_artfreq(out_dir, [r[0] for r in rows])

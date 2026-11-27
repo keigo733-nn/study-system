@@ -45,6 +45,52 @@ ALIASES = {
     '就服': '就業服務法', '性工': '性別平等工作法', '勞保': '勞工保險條例',
 }
 
+# ---------- 沿革：每次修法改了哪幾條（給「新修法 × 常考」用） ----------
+CN = {'零': 0, '〇': 0, '一': 1, '二': 2, '兩': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+def cn2num(s):
+    if s.isdigit(): return int(s)
+    sec = num = 0
+    for ch in s:
+        if ch in CN: num = CN[ch]
+        elif ch == '十': sec += (num or 1) * 10; num = 0
+        elif ch == '百': sec += (num or 1) * 100; num = 0
+    return sec + num
+DATE = re.compile(r'中華民國([零〇一二三四五六七八九十百\d]+)年([零〇一二三四五六七八九十\d]+)月([零〇一二三四五六七八九十\d]+)日')
+ACT = re.compile(r'(修正|增訂|刪除)(?:公布)?(全文|第([\d\-～、,，及]+)條)')
+def expand(spec):
+    out = []
+    for part in re.split(r'[、,，及]', spec):
+        part = part.strip()
+        if not part: continue
+        if '～' in part:
+            a, b = part.split('～', 1)
+            ma, mb = re.match(r'^(\d+)(?:-(\d+))?$', a), re.match(r'^(\d+)(?:-(\d+))?$', b)
+            if ma and mb and ma.group(1) == mb.group(1) and ma.group(2) and mb.group(2):      # 1113-2～1113-10
+                out += [f'{ma.group(1)}-{i}' for i in range(int(ma.group(2)), int(mb.group(2)) + 1)]
+            elif ma and mb and not ma.group(2) and not mb.group(2) and int(mb.group(1)) - int(ma.group(1)) < 200:
+                out += [str(i) for i in range(int(ma.group(1)), int(mb.group(1)) + 1)]
+            else: out += [a, b]
+        else: out.append(part)
+    return out
+def parse_hist(hist, since=20180101):
+    """沿革 → [[YYYYMMDD, ['條號', …] 或 '*'（全文修正）], …]，新的在後；只留 since 之後的"""
+    text = re.sub(r'\s+', '', hist or '')
+    out = []
+    ms = list(DATE.finditer(text))
+    for i, m in enumerate(ms):
+        seg = text[m.end(): ms[i + 1].start() if i + 1 < len(ms) else len(text)]
+        y, mo, d = cn2num(m.group(1)) + 1911, cn2num(m.group(2)), cn2num(m.group(3))
+        ymd = y * 10000 + mo * 100 + d
+        if ymd < since: continue
+        arts, whole = [], False
+        for a in ACT.finditer(seg):
+            if a.group(2) == '全文': whole = True
+            else: arts += expand(a.group(3))
+        if whole: out.append([str(ymd), '*'])
+        elif arts: out.append([str(ymd), list(dict.fromkeys(arts))])
+    return out
+
+
 ART_RE = re.compile(r'^(?:第\s*)?(\d+)(?:\s*-\s*(\d+))?(?:\s*條)?$')
 
 
@@ -182,6 +228,9 @@ def main(src, out):
             json.dump(full, f, ensure_ascii=False, separators=(',', ':'))
         entry = {k: meta[k] for k in ('p', 'n', 'kind', 'cat', 'd', 'x')}
         entry['cnt'] = len(full['arts'])
+        am = parse_hist(full['hist'])
+        if am:
+            entry['am'] = am                      # [[YYYYMMDD, [條號…] 或 '*'], …]（2018 年以後）
         index.append(entry)
         names[meta['n']] = entry
     alias_map = {}
