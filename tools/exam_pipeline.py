@@ -172,18 +172,48 @@ def artfreq_of(paper_ids, load):
     return freq
 
 
-FREQ_VERSION = 2          # 2：加上推定（inf）。版本不同時會重新統計一次
+FREQ_VERSION = 3          # 2：加上推定（inf）；3：加上大法官解釋（jyi）、憲法法庭判決（xp）。版本不同時會重新統計一次
+
+
+def jyi_freq_of(paper_ids, load):
+    """題目或選項（申論題就是題目）明文提到的釋字、憲判字 → {號次: [試卷序號, 題號, …]}"""
+    from jyi_refs import find_jyi, find_xp
+    jyi, xp = {}, {}
+    for pi, pid in enumerate(paper_ids):
+        try:
+            paper = load(pid)
+        except Exception:
+            continue
+        items = [(q['no'], q.get('q', '') + ' ' + ' '.join(q.get('opts') or []) + ' ' + q.get('passage', '')) for q in paper.get('mcq', [])] + \
+                [(-e['no'], e.get('text', '') + ' ' + e.get('passage', '')) for e in paper.get('essays', [])]
+        for no, text in items:
+            for n in find_jyi(text):
+                jyi.setdefault(str(n), []).extend([pi, no])
+            for k in find_xp(text):
+                xp.setdefault(k, []).extend([pi, no])
+    return jyi, xp
+
+
+def jyi_count():
+    try:
+        with open(os.path.join(JYI_DIR, 'index.json'), encoding='utf-8') as f:
+            return json.load(f).get('count', 0)
+    except (OSError, ValueError):
+        return 0
 
 
 def freq_current(out_dir):
+    """統計版本相同、而且大法官解釋資料沒有變多（資料抓到之後要重新推定一次）"""
     try:
         with open(os.path.join(out_dir, 'artfreq.json'), encoding='utf-8') as f:
-            return json.load(f).get('v') == FREQ_VERSION
+            d = json.load(f)
+        return d.get('v') == FREQ_VERSION and d.get('jyi_n', 0) == jyi_count()
     except (OSError, ValueError):
         return False
 
 
 LAWS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'docs', 'laws')
+JYI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'docs', 'jyi')
 
 
 def write_artfreq(out_dir, paper_ids):
@@ -192,6 +222,21 @@ def write_artfreq(out_dir, paper_ids):
             return json.load(f)
     freq = artfreq_of(paper_ids, load)
     out = {'v': FREQ_VERSION, 'updated': time.strftime('%Y-%m-%d %H:%M'), 'ids': paper_ids, 'laws': freq}
+    out['jyi'], out['xp'] = jyi_freq_of(paper_ids, load)
+    out['jyi_n'] = jyi_count()
+    print('提到大法官解釋的題目：', sum(len(v) // 2 for v in out['jyi'].values()), '題；憲判字：', sum(len(v) // 2 for v in out['xp'].values()), '題')
+    # 推定：「依司法院憲法解釋，…」沒寫號次的題目（要先有 docs/jyi 的解釋資料，見 build_jyi.py）
+    if os.path.exists(os.path.join(JYI_DIR, 'index.json')):
+        try:
+            from infer_jyi import infer_jyi_freq
+            explicit = {}
+            for n, arr in out['jyi'].items():
+                for i in range(0, len(arr), 2):
+                    explicit.setdefault((arr[i], arr[i + 1]), []).append(int(n))
+            out['jyi_inf'], out['jyi_check'] = infer_jyi_freq(paper_ids, load, JYI_DIR, explicit)
+            print('推定大法官解釋：', sum(len(v) // 2 for v in out['jyi_inf'].values()), '題；驗證', out['jyi_check'])
+        except ImportError:
+            pass
     # 推定：題目沒寫條號，但題幹＋正確答案跟某一條的文字很像（見 infer_articles.py）
     try:
         from infer_articles import infer_freq
